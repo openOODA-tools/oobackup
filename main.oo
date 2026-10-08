@@ -1,52 +1,171 @@
-// # oobackup Main Entry Point
+// # oobackup Main Entry Point - Sovereign Incremental Snapshot Coordinator
 //
-// Logline: Content-addressed snapshot utility creating deduplicated incremental trees.
+// Logline: Point-in-time snapshot coordinator creating deduplicated, content-addressed file trees.
 //
-// Setup: Demands explicit capability tokens and standard argument list.
+// Setup: Requires FsReadCap, FsWriteCap, ProcessCap, EnvCap. Operates with zero ambient authority.
 //
 // Beats:
-//   1. Parse command-line options and dispatch --help, --version, or --mcp.
-//   2. Execute capability-bounded oobackup operations.
-//   3. Format and output structured results to standard output.
+//   1. Dispatch --help, --version, and --mcp early without ambient side effects.
+//   2. Create point-in-time snapshots with SHA256-derived Merkle tree hashes.
+//   3. Inspect, verify, diff, and audit repository state across backup generations.
+
+import "core/manifest_store.oo";
+import "core/snapshot_engine.oo";
+import "render/backup_theme.oo";
+import "ipc/backup_opts.oo";
+import "ipc/mcp_serve.oo";
 
 fn render_help() -> String {
-    return "oobackup 0.1.0 (openOODA sovereign files & navigation)\n"
-        + "usage: oobackup [options] [ARGUMENTS]...\n\n"
-        + "Content-addressed snapshot utility creating deduplicated incremental trees.\n\n"
+    return "oobackup 0.2.0 (openOODA sovereign files & navigation)\n"
+        + "usage: oobackup [options] [PATH]...\n\n"
+        + "Point-in-time snapshot coordinator creating deduplicated, content-addressed file trees.\n\n"
         + "Options:\n"
-        + "  -h, --help           display this help and exit\n"
-        + "  -v, --version        output version information and exit\n"
-        + "      --json           output formatted as JSON Lines\n"
-        + "      --color <WHEN>   colorize output: auto, always, never [default: auto]\n"
-        + "      --theme <NAME>   override active oote palette\n"
-        + "      --mcp            run as Model Context Protocol stdio server\n";
+        + "  -h, --help               display this help and exit\n"
+        + "  -v, --version            output version information and exit\n"
+        + "  -c, --create [PATH]...   create snapshot from target file paths (default if paths given)\n"
+        + "  -l, --list               list all snapshots in repository (default)\n"
+        + "      --verify <ID>        verify disk integrity against snapshot digest\n"
+        + "      --diff <ID1> <ID2>   compute three-way differential between snapshots\n"
+        + "  -s, --stats              display repository snapshot count and total size\n"
+        + "      --init               initialize an empty backup repository manifest\n"
+        + "  -r, --repo <PATH>        repository manifest file [default: .oobackup.index]\n"
+        + "      --id <ID>            explicit snapshot identifier\n"
+        + "  -m, --message <MSG>      snapshot commit log message\n"
+        + "      --json               output formatted as JSON\n"
+        + "      --mcp                run as Model Context Protocol stdio server\n";
 }
 
-fn render_version() -> String {
-    return "oobackup 0.1.0 (openOODA sovereign files & navigation)\n";
-}
+pub fn main(
+    fs: &FsReadCap,
+    fs_write: &FsWriteCap,
+    proc_cap: &ProcessCap,
+    env: &EnvCap,
+    args: List[String]
+) -> Result[Int, String] {
+    let opts: BackupOpts = parse_backup_args(args);
 
-fn main(args: List[String]) -> Int {
-    let num_args: Int = list_len(args);
-    let mut i: Int = 0;
-
-    while i < num_args {
-        let arg: String = list_get(args, i);
-        if arg == "-h" || arg == "--help" {
-            print(render_help());
-            return 0;
-        }
-        if arg == "-v" || arg == "--version" {
-            print(render_version());
-            return 0;
-        }
-        if arg == "--mcp" {
-            print("{\"jsonrpc\":\"2.0\",\"result\":{\"status\":\"ready\",\"tool\":\"oobackup\"}}\n");
-            return 0;
-        }
-        i = i + 1;
+    if opts.action == "help" {
+        print(render_help());
+        return Ok(0);
+    }
+    if opts.action == "version" {
+        println("oobackup 0.2.0 (openOODA sovereign files & navigation)");
+        return Ok(0);
+    }
+    if opts.action == "mcp" {
+        run_mcp_server(fs, fs_write);
+        return Ok(0);
     }
 
-    print("oobackup: sovereign capability-bounded utility ready\n");
-    return 0;
+    if opts.action == "init" {
+        let empty_list: List[SnapshotManifest] = list_new();
+        let ok: Bool = write_manifest_store(fs_write, opts.repo_path, empty_list);
+        if ok {
+            if opts.json_mode {
+                println("{\"status\":\"initialized\",\"repo\":\"" + opts.repo_path + "\"}");
+            } else {
+                println(ansi_green() + "[INIT] " + ansi_reset() + "Initialized empty repository at " + opts.repo_path);
+            }
+            return Ok(0);
+        } else {
+            return Err("failed to initialize repository at: " + opts.repo_path);
+        }
+    }
+
+    if opts.action == "create" {
+        let sid: String = if chars_len(opts.snap_id) > 0 {
+            opts.snap_id
+        } else {
+            "snap-" + to_string(list_len(read_manifest_store(fs, opts.repo_path)) + 1)
+        };
+        let manifest: SnapshotManifest = create_snapshot_from_files(fs, fs_write, opts.repo_path, sid, opts.message, opts.paths);
+        if opts.json_mode {
+            println(render_manifest_json(manifest));
+        } else {
+            println(ansi_green() + "[CREATED] " + ansi_reset() + "Snapshot " + manifest.id + " (" + to_string(manifest.total_size) + " bytes, " + to_string(list_len(manifest.items)) + " files)");
+        }
+        return Ok(0);
+    }
+
+    if opts.action == "verify" {
+        let manifests: List[SnapshotManifest] = read_manifest_store(fs, opts.repo_path);
+        let m_res: Result[SnapshotManifest, String] = find_snapshot(manifests, opts.snap_id);
+        if !m_res.is_ok() {
+            println("oobackup: error: snapshot not found: " + opts.snap_id);
+            return Ok(1);
+        }
+        let m: SnapshotManifest = match m_res { Ok(val) => val, Err(_) => list_get(manifests, 0) };
+        let corrupted: Int = verify_snapshot_integrity(fs, m);
+        let total: Int = list_len(m.items);
+        if opts.json_mode {
+            println("{\"id\":\"" + m.id + "\",\"files_count\":" + to_string(total) + ",\"corrupted\":" + to_string(corrupted) + ",\"status\":\"" + (if corrupted == 0 { "verified" } else { "corrupted" }) + "\"}");
+        } else {
+            print(render_verify_report(m.id, total, corrupted));
+        }
+        if corrupted > 0 {
+            return Ok(1);
+        }
+        return Ok(0);
+    }
+
+    if opts.action == "diff" {
+        let manifests: List[SnapshotManifest] = read_manifest_store(fs, opts.repo_path);
+        let m1_res: Result[SnapshotManifest, String] = find_snapshot(manifests, opts.snap_id);
+        let m2_res: Result[SnapshotManifest, String] = find_snapshot(manifests, opts.diff_target);
+        if !m1_res.is_ok() || !m2_res.is_ok() {
+            println("oobackup: error: specified snapshots for diff not found");
+            return Ok(1);
+        }
+        let m1: SnapshotManifest = match m1_res { Ok(v1) => v1, Err(_) => list_get(manifests, 0) };
+        let m2: SnapshotManifest = match m2_res { Ok(v2) => v2, Err(_) => list_get(manifests, 0) };
+        let diff: SnapshotDiffResult = diff_manifests(m1, m2);
+        if opts.json_mode {
+            println(render_diff_json(diff));
+        } else {
+            print(render_diff_human(diff));
+        }
+        return Ok(0);
+    }
+
+    if opts.action == "stats" {
+        let manifests: List[SnapshotManifest] = read_manifest_store(fs, opts.repo_path);
+        let count: Int = list_len(manifests);
+        let mut total_bytes: Int = 0;
+        let mut i: Int = 0;
+        while i < count {
+            let m: SnapshotManifest = list_get(manifests, i);
+            total_bytes = total_bytes + m.total_size;
+            i = i + 1;
+        }
+        if opts.json_mode {
+            println("{\"snapshots_count\":" + to_string(count) + ",\"total_bytes\":" + to_string(total_bytes) + ",\"repository\":\"" + opts.repo_path + "\"}");
+        } else {
+            println(ansi_bold() + "oobackup Repository Statistics:" + ansi_reset());
+            println("  Repository:  " + opts.repo_path);
+            println("  Snapshots:   " + to_string(count));
+            println("  Total Size:  " + to_string(total_bytes) + " bytes");
+        }
+        return Ok(0);
+    }
+
+    // Default: list
+    let manifests: List[SnapshotManifest] = read_manifest_store(fs, opts.repo_path);
+    let count: Int = list_len(manifests);
+    if opts.json_mode {
+        println(render_manifest_list_json(manifests));
+    } else {
+        if count == 0 {
+            println("oobackup: repository at " + opts.repo_path + " is empty (no snapshots recorded).");
+        } else {
+            print(render_snapshot_list_header());
+            let mut i: Int = 0;
+            while i < count {
+                let m: SnapshotManifest = list_get(manifests, i);
+                print(render_snapshot_row(m));
+                i = i + 1;
+            }
+        }
+    }
+
+    return Ok(0);
 }

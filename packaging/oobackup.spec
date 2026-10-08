@@ -1,5 +1,5 @@
 Name:           oobackup
-Version:        0.1.0
+Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Content-addressed snapshot utility creating deduplicated incremental trees.
 License:        ASL 2.0
@@ -24,5 +24,5 @@ install -m 0755 %{SOURCE1} %{buildroot}/usr/bin/oobackup-uninstall
 /usr/bin/oobackup-uninstall
 
 %changelog
-* Wed Oct 07 2026 openOODA-tools <ops@openooda.org> - 0.1.0-1
-- Initial sovereign blueprint scaffolding
+* Wed Oct 07 2026 openOODA-tools <ops@openooda.org> - 0.2.0-1
+- Sovereign snapshot engine and deduplicated content-addressed repository

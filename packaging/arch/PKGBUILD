@@ -1,7 +1,7 @@
 # Maintainer: openOODA-tools <ops@openooda.org>
 pkgname=oobackup-bin
 _pkgname=oobackup
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Content-addressed snapshot utility creating deduplicated incremental trees."
 arch=('x86_64')

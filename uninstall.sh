@@ -4,7 +4,7 @@
 # "Removes oobackup binary, package installations, and cache."
 #
 # Usage:
-#   curl -fsSL https://openooda-toobackup.github.io/oobackup/uninstall.sh | bash
+#   curl -fsSL https://openooda-tools.github.io/oobackup/uninstall.sh | bash
 #   or: ./uninstall.sh [options]
 #
 # Options:

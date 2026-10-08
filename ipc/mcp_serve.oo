@@ -1,0 +1,155 @@
+// # Model Context Protocol (MCP) Stdio Server for oobackup
+//
+// Logline: JSON-RPC 2.0 stdio server providing snapshot capture, verification, differential, and catalog tools.
+//
+// Setup: Demands FsReadCap and FsWriteCap for repository access and stdio streaming without ambient authority.
+//
+// Beats:
+//   1. Ingest JSON-RPC 2.0 frames over stdin and dispatch RPC methods.
+//   2. Advertise snapshot capture, verification, diffing, and catalog inspection tools.
+//   3. Execute capability-bounded repository actions and stream JSON responses.
+
+import "core/manifest_store.oo";
+import "core/snapshot_engine.oo";
+import "render/backup_theme.oo";
+import "ipc/json_field.oo";
+
+pub fn run_mcp_server(fs_r: &FsReadCap, fs_w: &FsWriteCap) {
+    let mut running: Bool = true;
+    while running {
+        let line_res: Result[String, String] = oo_read_stdin_chunk(fs_r, 8192);
+        if !line_res.is_ok() {
+            running = false;
+        } else {
+            let line: String = match line_res { Ok(s) => s, Err(_) => "" };
+            let trimmed: String = str_trim(line);
+            if chars_len(trimmed) == 0 {
+                running = false;
+            } else {
+                let id: String = json_get_field(trimmed, "id");
+                let method: String = json_get_string(trimmed, "method");
+
+                if method == "initialize" {
+                    let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                        ",\"result\":{\"protocolVersion\":\"2024-11-05\"," +
+                        "\"serverInfo\":{\"name\":\"oobackup\",\"version\":\"0.2.0\"}," +
+                        "\"capabilities\":{\"tools\":{}}}}";
+                    println(resp);
+                } else if method == "notifications/initialized" {
+                    // Ack
+                } else if method == "tools/list" {
+                    let t1: String = "{\"name\":\"backup_create\",\"description\":\"Create a new point-in-time file snapshot in repository\"," +
+                        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"},\"message\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}";
+                    let t2: String = "{\"name\":\"backup_list\",\"description\":\"List all snapshots stored in the backup repository\"," +
+                        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\"}}}}";
+                    let t3: String = "{\"name\":\"backup_verify\",\"description\":\"Verify integrity of files in a snapshot against disk content\"," +
+                        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\"},\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}}";
+                    let t4: String = "{\"name\":\"backup_diff\",\"description\":\"Compute three-way differential between two snapshots\"," +
+                        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\"},\"id1\":{\"type\":\"string\"},\"id2\":{\"type\":\"string\"}},\"required\":[\"id1\",\"id2\"]}}";
+                    let t5: String = "{\"name\":\"backup_stats\",\"description\":\"Query summary metrics and health of backup repository\"," +
+                        "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"repo\":{\"type\":\"string\"}}}}";
+                    let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                        ",\"result\":{\"tools\":[" + t1 + "," + t2 + "," + t3 + "," + t4 + "," + t5 + "]}}";
+                    println(resp);
+                } else if method == "tools/call" {
+                    let params: String = json_get_field(trimmed, "params");
+                    let tool_name: String = json_get_string(params, "name");
+                    let args: String = json_get_field(params, "arguments");
+
+                    if tool_name == "backup_create" {
+                        let path_arg: String = json_get_string(args, "path");
+                        let repo_in: String = json_get_string(args, "repo");
+                        let repo_file: String = if chars_len(repo_in) > 0 { repo_in } else { ".oobackup.index" };
+                        let sid_in: String = json_get_string(args, "id");
+                        let sid: String = if chars_len(sid_in) > 0 { sid_in } else { "snap-01" };
+                        let msg_in: String = json_get_string(args, "message");
+                        let msg: String = if chars_len(msg_in) > 0 { msg_in } else { "Snapshot captured via MCP" };
+
+                        let mut paths: List[String] = list_new();
+                        if chars_len(path_arg) > 0 {
+                            paths = list_push(paths, path_arg);
+                        }
+                        let manifest: SnapshotManifest = create_snapshot_from_files(fs_r, fs_w, repo_file, sid, msg, paths);
+                        let j: String = render_manifest_json(manifest);
+                        let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                            ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + json_escape(j) + "\"}]}}";
+                        println(resp);
+                    } else if tool_name == "backup_list" {
+                        let repo_in: String = json_get_string(args, "repo");
+                        let repo_file: String = if chars_len(repo_in) > 0 { repo_in } else { ".oobackup.index" };
+                        let manifests: List[SnapshotManifest] = read_manifest_store(fs_r, repo_file);
+                        let j: String = render_manifest_list_json(manifests);
+                        let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                            ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + json_escape(j) + "\"}]}}";
+                        println(resp);
+                    } else if tool_name == "backup_verify" {
+                        let repo_in: String = json_get_string(args, "repo");
+                        let repo_file: String = if chars_len(repo_in) > 0 { repo_in } else { ".oobackup.index" };
+                        let sid: String = json_get_string(args, "id");
+                        let manifests: List[SnapshotManifest] = read_manifest_store(fs_r, repo_file);
+                        let m_res: Result[SnapshotManifest, String] = find_snapshot(manifests, sid);
+                        if m_res.is_ok() {
+                            let m: SnapshotManifest = match m_res { Ok(val) => val, Err(_) => list_get(manifests, 0) };
+                            let corrupted: Int = verify_snapshot_integrity(fs_r, m);
+                            let j: String = "{\"id\":\"" + m.id + "\",\"files_count\":" + to_string(list_len(m.items)) + ",\"corrupted\":" + to_string(corrupted) + ",\"status\":\"" + (if corrupted == 0 { "verified" } else { "corrupted" }) + "\"}";
+                            let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                                ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + json_escape(j) + "\"}]}}";
+                            println(resp);
+                        } else {
+                            let err_msg: String = match m_res { Ok(_) => "", Err(e) => e };
+                            let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                                ",\"error\":{\"code\":-32000,\"message\":\"" + json_escape(err_msg) + "\"}}";
+                            println(resp);
+                        }
+                    } else if tool_name == "backup_diff" {
+                        let repo_in: String = json_get_string(args, "repo");
+                        let repo_file: String = if chars_len(repo_in) > 0 { repo_in } else { ".oobackup.index" };
+                        let sid1: String = json_get_string(args, "id1");
+                        let sid2: String = json_get_string(args, "id2");
+                        let manifests: List[SnapshotManifest] = read_manifest_store(fs_r, repo_file);
+                        let m1_res: Result[SnapshotManifest, String] = find_snapshot(manifests, sid1);
+                        let m2_res: Result[SnapshotManifest, String] = find_snapshot(manifests, sid2);
+
+                        if m1_res.is_ok() && m2_res.is_ok() {
+                            let m1: SnapshotManifest = match m1_res { Ok(v1) => v1, Err(_) => list_get(manifests, 0) };
+                            let m2: SnapshotManifest = match m2_res { Ok(v2) => v2, Err(_) => list_get(manifests, 0) };
+                            let diff: SnapshotDiffResult = diff_manifests(m1, m2);
+                            let j: String = render_diff_json(diff);
+                            let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                                ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + json_escape(j) + "\"}]}}";
+                            println(resp);
+                        } else {
+                            let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                                ",\"error\":{\"code\":-32000,\"message\":\"One or both snapshots not found\"}}";
+                            println(resp);
+                        }
+                    } else if tool_name == "backup_stats" {
+                        let repo_in: String = json_get_string(args, "repo");
+                        let repo_file: String = if chars_len(repo_in) > 0 { repo_in } else { ".oobackup.index" };
+                        let manifests: List[SnapshotManifest] = read_manifest_store(fs_r, repo_file);
+                        let count: Int = list_len(manifests);
+                        let mut total_bytes: Int = 0;
+                        let mut i: Int = 0;
+                        while i < count {
+                            let m: SnapshotManifest = list_get(manifests, i);
+                            total_bytes = total_bytes + m.total_size;
+                            i = i + 1;
+                        }
+                        let j: String = "{\"snapshots_count\":" + to_string(count) + ",\"total_bytes\":" + to_string(total_bytes) + ",\"repository\":\"" + json_escape(repo_file) + "\"}";
+                        let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                            ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + json_escape(j) + "\"}]}}";
+                        println(resp);
+                    } else {
+                        let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                            ",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}";
+                        println(resp);
+                    }
+                } else {
+                    let resp: String = "{\"jsonrpc\":\"2.0\",\"id\":" + id +
+                        ",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}";
+                    println(resp);
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,16 @@
+// # oobackup Render Subsystem Anchor
+//
+// Logline: Consolidates snapshot catalog tables, diff visualizers, and JSON serializers.
+//
+// Setup: Root barrel shim for snapshot rendering and formatting domain.
+//
+// Beats:
+//   1. Re-export ANSI color styles and text formatting primitives.
+//   2. Re-export tabular snapshot catalog listings and diff reports.
+//   3. Re-export JSON serializers for programmatic snapshot inspection.
+
+import "render/backup_theme.oo";
+
+pub fn render_subsystem_version() -> String {
+    return "0.2.0";
+}

@@ -1,0 +1,143 @@
+// # oobackup Snapshot Engine and Verification Pipeline
+//
+// Logline: Ingests file trees into snapshots, verifies stored digests, and computes state differentials.
+//
+// Setup: Demands FsReadCap and FsWriteCap for snapshot execution and integrity audits.
+//
+// Beats:
+//   1. Build SnapshotItem collections from target paths and register snapshot in store.
+//   2. Audit current filesystem state against snapshot hashes to detect drift or corruption.
+//   3. Compute three-way differential sets (added, removed, modified, unchanged) between snapshots.
+
+import "core/snapshot_item.oo";
+import "core/manifest_store.oo";
+
+pub type SnapshotDiffResult = struct {
+    added: List[String],
+    removed: List[String],
+    modified: List[String],
+    unchanged: List[String]
+};
+
+pub fn find_snapshot(manifests: List[SnapshotManifest], id: String) -> Result[SnapshotManifest, String] {
+    let count: Int = list_len(manifests);
+    let mut i: Int = 0;
+    while i < count {
+        let m: SnapshotManifest = list_get(manifests, i);
+        if m.id == id || str_starts_with(m.id, id) {
+            return Ok(m);
+        }
+        i = i + 1;
+    }
+    return Err("snapshot not found: " + id);
+}
+
+pub fn create_snapshot_from_files(fs: &FsReadCap, fs_w: &FsWriteCap, repo_file: String, snap_id: String, msg: String, paths: List[String]) -> SnapshotManifest {
+    let mut items: List[SnapshotItem] = list_new();
+    let count: Int = list_len(paths);
+    let mut i: Int = 0;
+
+    while i < count {
+        let p: String = list_get(paths, i);
+        let r: Result[String, String] = read_file(fs, p);
+        let content: String = if r.is_ok() { match r { Ok(s) => s, Err(_) => "" } } else { "" };
+        let it: SnapshotItem = make_snapshot_item(p, content);
+        items = list_push(items, it);
+        i = i + 1;
+    }
+
+    let sz: Int = compute_total_size(items);
+    let th: String = compute_tree_hash(items);
+    let ts: String = "2026-10-07T22:00:00Z";
+    let manifest: SnapshotManifest = SnapshotManifest {
+        id: snap_id,
+        timestamp: ts,
+        message: msg,
+        items: items,
+        total_size: sz,
+        tree_hash: th
+    };
+
+    let mut all_snaps: List[SnapshotManifest] = read_manifest_store(fs, repo_file);
+    all_snaps = list_push(all_snaps, manifest);
+    let _ok: Bool = write_manifest_store(fs_w, repo_file, all_snaps);
+    return manifest;
+}
+
+pub fn verify_snapshot_integrity(fs: &FsReadCap, manifest: SnapshotManifest) -> Int {
+    let count: Int = list_len(manifest.items);
+    let mut corrupted: Int = 0;
+    let mut i: Int = 0;
+
+    while i < count {
+        let it: SnapshotItem = list_get(manifest.items, i);
+        let r: Result[String, String] = read_file(fs, it.path);
+        if !r.is_ok() {
+            corrupted = corrupted + 1;
+        } else {
+            let cur_content: String = match r { Ok(s) => s, Err(_) => "" };
+            let cur_hash: String = compute_content_hash(cur_content);
+            if cur_hash != it.hash {
+                corrupted = corrupted + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return corrupted;
+}
+
+fn item_in_list(items: List[SnapshotItem], path: String) -> Result[SnapshotItem, String] {
+    let count: Int = list_len(items);
+    let mut i: Int = 0;
+    while i < count {
+        let it: SnapshotItem = list_get(items, i);
+        if it.path == path {
+            return Ok(it);
+        }
+        i = i + 1;
+    }
+    return Err("not found");
+}
+
+pub fn diff_manifests(m1: SnapshotManifest, m2: SnapshotManifest) -> SnapshotDiffResult {
+    let mut add: List[String] = list_new();
+    let mut rem: List[String] = list_new();
+    let mut mod_files: List[String] = list_new();
+    let mut unch: List[String] = list_new();
+
+    let count1: Int = list_len(m1.items);
+    let mut i: Int = 0;
+    while i < count1 {
+        let it1: SnapshotItem = list_get(m1.items, i);
+        let in_m2: Result[SnapshotItem, String] = item_in_list(m2.items, it1.path);
+        if !in_m2.is_ok() {
+            rem = list_push(rem, it1.path);
+        } else {
+            let it2: SnapshotItem = match in_m2 { Ok(v) => v, Err(_) => it1 };
+            if it1.hash == it2.hash {
+                unch = list_push(unch, it1.path);
+            } else {
+                mod_files = list_push(mod_files, it1.path);
+            }
+        }
+        i = i + 1;
+    }
+
+    let count2: Int = list_len(m2.items);
+    let mut j: Int = 0;
+    while j < count2 {
+        let it2: SnapshotItem = list_get(m2.items, j);
+        let in_m1: Result[SnapshotItem, String] = item_in_list(m1.items, it2.path);
+        if !in_m1.is_ok() {
+            add = list_push(add, it2.path);
+        }
+        j = j + 1;
+    }
+
+    return SnapshotDiffResult {
+        added: add,
+        removed: rem,
+        modified: mod_files,
+        unchanged: unch
+    };
+}

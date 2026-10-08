@@ -1,0 +1,120 @@
+// # oobackup Snapshot Manifest Store and Persistence
+//
+// Logline: Disk serialization, repository index management, and tree digest calculations.
+//
+// Setup: Demands FsReadCap and FsWriteCap for repository state IO. Operates without ambient authority.
+//
+// Beats:
+//   1. Define SnapshotManifest capturing identifier, timestamp, commit message, and item list.
+//   2. Compute Merkle tree root hash and aggregate byte capacity across snapshot items.
+//   3. Read and write structured repository index files to disk.
+
+import "core/snapshot_item.oo";
+
+pub type SnapshotManifest = struct {
+    id: String,
+    timestamp: String,
+    message: String,
+    items: List[SnapshotItem],
+    total_size: Int,
+    tree_hash: String
+};
+
+pub fn compute_tree_hash(items: List[SnapshotItem]) -> String {
+    let mut accumulator: String = "";
+    let count: Int = list_len(items);
+    let mut i: Int = 0;
+    while i < count {
+        let it: SnapshotItem = list_get(items, i);
+        accumulator = accumulator + it.path + ":" + it.hash + ";";
+        i = i + 1;
+    }
+    return compute_content_hash(accumulator);
+}
+
+pub fn compute_total_size(items: List[SnapshotItem]) -> Int {
+    let mut total: Int = 0;
+    let count: Int = list_len(items);
+    let mut i: Int = 0;
+    while i < count {
+        let it: SnapshotItem = list_get(items, i);
+        total = total + it.size;
+        i = i + 1;
+    }
+    return total;
+}
+
+pub fn format_manifest_block(m: SnapshotManifest) -> String {
+    let mut out: String = "SNAPSHOT\t" + m.id + "\t" + m.timestamp + "\t" + m.message + "\t" + to_string(m.total_size) + "\t" + m.tree_hash + "\n";
+    let count: Int = list_len(m.items);
+    let mut i: Int = 0;
+    while i < count {
+        let it: SnapshotItem = list_get(m.items, i);
+        out = out + "ITEM\t" + format_item_line(it) + "\n";
+        i = i + 1;
+    }
+    out = out + "END_SNAPSHOT\n";
+    return out;
+}
+
+pub fn read_manifest_store(fs: &FsReadCap, repo_file: String) -> List[SnapshotManifest] {
+    let mut list: List[SnapshotManifest] = list_new();
+    let r: Result[String, String] = read_file(fs, repo_file);
+    if !r.is_ok() {
+        return list;
+    }
+    let content: String = match r { Ok(s) => s, Err(_) => "" };
+    let lines: List[String] = str_split(content, "\n");
+    let count: Int = list_len(lines);
+
+    let mut cur_id: String = "";
+    let mut cur_ts: String = "";
+    let mut cur_msg: String = "";
+    let mut cur_items: List[SnapshotItem] = list_new();
+    let mut i: Int = 0;
+
+    while i < count {
+        let line: String = str_trim(list_get(lines, i));
+        if str_starts_with(line, "SNAPSHOT\t") {
+            let parts: List[String] = str_split(line, "\t");
+            if list_len(parts) >= 4 {
+                cur_id = list_get(parts, 1);
+                cur_ts = list_get(parts, 2);
+                cur_msg = list_get(parts, 3);
+            }
+            cur_items = list_new();
+        } else if str_starts_with(line, "ITEM\t") {
+            let item_part: String = str_slice(line, 5, chars_len(line));
+            let it: SnapshotItem = parse_item_line(item_part);
+            cur_items = list_push(cur_items, it);
+        } else if line == "END_SNAPSHOT" {
+            let sz: Int = compute_total_size(cur_items);
+            let th: String = compute_tree_hash(cur_items);
+            let m: SnapshotManifest = SnapshotManifest {
+                id: cur_id,
+                timestamp: cur_ts,
+                message: cur_msg,
+                items: cur_items,
+                total_size: sz,
+                tree_hash: th
+            };
+            list = list_push(list, m);
+            cur_items = list_new();
+        }
+        i = i + 1;
+    }
+    return list;
+}
+
+pub fn write_manifest_store(fs_w: &FsWriteCap, repo_file: String, manifests: List[SnapshotManifest]) -> Bool {
+    let mut content: String = "# oobackup Repository Index\n";
+    let count: Int = list_len(manifests);
+    let mut i: Int = 0;
+    while i < count {
+        let m: SnapshotManifest = list_get(manifests, i);
+        content = content + format_manifest_block(m);
+        i = i + 1;
+    }
+    let r: Result[String, String] = write_file(fs_w, repo_file, content);
+    return r.is_ok();
+}

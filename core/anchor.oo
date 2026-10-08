@@ -1,0 +1,18 @@
+// # oobackup Core Subsystem Anchor
+//
+// Logline: Consolidates snapshot item models, repository manifests, and state diff engine.
+//
+// Setup: Root barrel shim for core snapshot management and deduplication domain.
+//
+// Beats:
+//   1. Re-export SnapshotItem models and content hash derivation.
+//   2. Re-export repository manifest store serialization and disk index parsing.
+//   3. Re-export snapshot capture, integrity verification, and state differencing.
+
+import "core/snapshot_item.oo";
+import "core/manifest_store.oo";
+import "core/snapshot_engine.oo";
+
+pub fn core_subsystem_version() -> String {
+    return "0.2.0";
+}

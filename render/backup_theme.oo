@@ -1,0 +1,123 @@
+// # oobackup Rendering and Theme Formatter
+//
+// Logline: Formats snapshot catalogs, differential reports, and verification statuses.
+//
+// Setup: Pure string formatter supporting ANSI color palettes and structured JSON output.
+//
+// Beats:
+//   1. Provide ANSI styling helpers for snapshot identifiers, byte counts, and status tags.
+//   2. Format tabular listings of stored repository snapshots.
+//   3. Render snapshot state differentials and JSON serialized reports.
+
+import "core/manifest_store.oo";
+import "core/snapshot_engine.oo";
+
+pub fn ansi_reset() -> String { return "\x1b[0m"; }
+pub fn ansi_bold() -> String { return "\x1b[1m"; }
+pub fn ansi_dim() -> String { return "\x1b[2m"; }
+pub fn ansi_green() -> String { return "\x1b[32m"; }
+pub fn ansi_red() -> String { return "\x1b[31m"; }
+pub fn ansi_cyan() -> String { return "\x1b[36m"; }
+pub fn ansi_yellow() -> String { return "\x1b[33m"; }
+
+fn json_escape_simple(s: String) -> String {
+    let mut out: String = "";
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "\\" {
+            out = out + "\\\\";
+        } else if c == "\"" {
+            out = out + "\\\"";
+        } else if c == "\n" {
+            out = out + "\\n";
+        } else if c == "\r" {
+            out = out + "\\r";
+        } else if c == "\t" {
+            out = out + "\\t";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn render_snapshot_list_header() -> String {
+    return ansi_bold() + " ID        TIMESTAMP            FILES  TOTAL SIZE  TREE HASH (PREFIX)   MESSAGE" + ansi_reset() + "\n"
+        + " ────────  ───────────────────  ─────  ──────────  ───────────────────  ───────\n";
+}
+
+fn pad_right(s: String, width: Int) -> String {
+    let mut out: String = s;
+    while chars_len(out) < width {
+        out = out + " ";
+    }
+    return out;
+}
+
+pub fn render_snapshot_row(m: SnapshotManifest) -> String {
+    let id_str: String = pad_right(m.id, 9);
+    let ts_str: String = pad_right(m.timestamp, 20);
+    let count_str: String = pad_right(to_string(list_len(m.items)), 6);
+    let sz_str: String = pad_right(to_string(m.total_size) + "B", 11);
+    let hash_short: String = if chars_len(m.tree_hash) >= 12 {
+        str_slice(m.tree_hash, 0, 12) + "..."
+    } else {
+        m.tree_hash
+    };
+    let hash_str: String = pad_right(hash_short, 20);
+    return " " + ansi_cyan() + id_str + ansi_reset() + " " + ts_str + " " + count_str + " " + sz_str + " " + ansi_dim() + hash_str + ansi_reset() + " " + m.message + "\n";
+}
+
+pub fn render_manifest_json(m: SnapshotManifest) -> String {
+    return "{\"id\":\"" + json_escape_simple(m.id) + "\""
+        + ",\"timestamp\":\"" + m.timestamp + "\""
+        + ",\"message\":\"" + json_escape_simple(m.message) + "\""
+        + ",\"files_count\":" + to_string(list_len(m.items))
+        + ",\"total_size\":" + to_string(m.total_size)
+        + ",\"tree_hash\":\"" + m.tree_hash + "\"}";
+}
+
+pub fn render_manifest_list_json(manifests: List[SnapshotManifest]) -> String {
+    let mut j: String = "[";
+    let count: Int = list_len(manifests);
+    let mut i: Int = 0;
+    while i < count {
+        if i > 0 { j = j + ","; }
+        let m: SnapshotManifest = list_get(manifests, i);
+        j = j + render_manifest_json(m);
+        i = i + 1;
+    }
+    j = j + "]";
+    return j;
+}
+
+pub fn render_diff_human(diff: SnapshotDiffResult) -> String {
+    let mut out: String = ansi_bold() + "Snapshot Differential Report:" + ansi_reset() + "\n";
+    let a_cnt: Int = list_len(diff.added);
+    let r_cnt: Int = list_len(diff.removed);
+    let m_cnt: Int = list_len(diff.modified);
+    let u_cnt: Int = list_len(diff.unchanged);
+
+    out = out + "  Added:     " + ansi_green() + to_string(a_cnt) + ansi_reset() + "\n";
+    out = out + "  Removed:   " + ansi_red() + to_string(r_cnt) + ansi_reset() + "\n";
+    out = out + "  Modified:  " + ansi_yellow() + to_string(m_cnt) + ansi_reset() + "\n";
+    out = out + "  Unchanged: " + to_string(u_cnt) + "\n";
+    return out;
+}
+
+pub fn render_diff_json(diff: SnapshotDiffResult) -> String {
+    return "{\"added\":" + to_string(list_len(diff.added))
+        + ",\"removed\":" + to_string(list_len(diff.removed))
+        + ",\"modified\":" + to_string(list_len(diff.modified))
+        + ",\"unchanged\":" + to_string(list_len(diff.unchanged)) + "}";
+}
+
+pub fn render_verify_report(id: String, total: Int, corrupted: Int) -> String {
+    if corrupted == 0 {
+        return ansi_green() + ansi_bold() + "[VERIFIED] " + ansi_reset() + "Snapshot " + id + ": all " + to_string(total) + " files intact.\n";
+    }
+    return ansi_red() + ansi_bold() + "[CORRUPTED] " + ansi_reset() + "Snapshot " + id + ": " + to_string(corrupted) + " of " + to_string(total) + " files corrupted or missing.\n";
+}

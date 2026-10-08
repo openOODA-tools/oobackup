@@ -1,0 +1,111 @@
+// # oobackup CLI Options Parser
+//
+// Logline: Ingests command line arguments into typed backup execution options.
+//
+// Setup: Pure argument decoding for repository actions and operational flags.
+//
+// Beats:
+//   1. Define BackupOpts data structure covering all operational modes.
+//   2. Parse flags for creation, verification, diffing, listing, and MCP invocation.
+//   3. Extract repository paths, commit messages, and target snapshot identifiers.
+
+pub type BackupOpts = struct {
+    action: String,
+    repo_path: String,
+    snap_id: String,
+    diff_target: String,
+    message: String,
+    paths: List[String],
+    json_mode: Bool,
+    error_msg: String
+};
+
+pub fn default_backup_opts() -> BackupOpts {
+    return BackupOpts {
+        action: "list",
+        repo_path: ".oobackup.index",
+        snap_id: "",
+        diff_target: "",
+        message: "Automated snapshot",
+        paths: list_new(),
+        json_mode: false,
+        error_msg: ""
+    };
+}
+
+pub fn parse_backup_args(args: List[String]) -> BackupOpts {
+    let mut opts: BackupOpts = default_backup_opts();
+    let n: Int = list_len(args);
+    let mut i: Int = 0;
+    let mut explicit_action: Bool = false;
+
+    while i < n {
+        let arg: String = list_get(args, i);
+        if arg == "-h" || arg == "--help" {
+            opts.action = "help";
+            return opts;
+        } else if arg == "-v" || arg == "--version" {
+            opts.action = "version";
+            return opts;
+        } else if arg == "--mcp" {
+            opts.action = "mcp";
+            explicit_action = true;
+        } else if arg == "--json" {
+            opts.json_mode = true;
+        } else if arg == "--init" {
+            opts.action = "init";
+            explicit_action = true;
+        } else if arg == "-l" || arg == "--list" {
+            opts.action = "list";
+            explicit_action = true;
+        } else if arg == "-s" || arg == "--stats" {
+            opts.action = "stats";
+            explicit_action = true;
+        } else if arg == "-c" || arg == "--create" {
+            opts.action = "create";
+            explicit_action = true;
+        } else if arg == "--verify" {
+            opts.action = "verify";
+            explicit_action = true;
+            if i + 1 < n {
+                i = i + 1;
+                opts.snap_id = list_get(args, i);
+            }
+        } else if arg == "--diff" {
+            opts.action = "diff";
+            explicit_action = true;
+            if i + 1 < n {
+                i = i + 1;
+                opts.snap_id = list_get(args, i);
+            }
+            if i + 1 < n {
+                i = i + 1;
+                opts.diff_target = list_get(args, i);
+            }
+        } else if arg == "-r" || arg == "--repo" {
+            if i + 1 < n {
+                i = i + 1;
+                opts.repo_path = list_get(args, i);
+            }
+        } else if arg == "-m" || arg == "--message" {
+            if i + 1 < n {
+                i = i + 1;
+                opts.message = list_get(args, i);
+            }
+        } else if arg == "--id" {
+            if i + 1 < n {
+                i = i + 1;
+                opts.snap_id = list_get(args, i);
+            }
+        } else if !str_starts_with(arg, "-") {
+            if !explicit_action {
+                opts.action = "create";
+                explicit_action = true;
+            }
+            opts.paths = list_push(opts.paths, arg);
+        }
+        i = i + 1;
+    }
+
+    return opts;
+}

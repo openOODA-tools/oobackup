@@ -1,13 +1,23 @@
-// # oobackup Root Anchor
+// # oobackup Root Anchor Subsystem
 //
-// Logline: Top-level anchor re-exporting options, core logic, render, and ipc subsystems.
+// Logline: Top-level anchor re-exporting core backup engine, render formatters, and MCP stdio IPC.
 //
-// Setup: Pure shim re-exporting all oobackup subsystem anchors.
+// Setup: Root barrel shim linking all oobackup subsystem anchors into a coherent suite.
 //
 // Beats:
-//   1. Re-export options parsing subsystem.
-//   2. Re-export core oobackup execution engine.
-//   3. Re-export render formatting subsystem.
-//   4. Re-export Model Context Protocol (MCP) IPC subsystem.
+//   1. Re-export core snapshot item models, repository manifests, and state diff engine.
+//   2. Re-export render formatting subsystem with ANSI tables and JSON visualizers.
+//   3. Re-export Model Context Protocol (MCP) IPC subsystem and CLI argument parsers.
+//   4. Expose unified system metadata and version verification constants.
 
-import "main.oo";
+import "core/anchor.oo";
+import "render/anchor.oo";
+import "ipc/anchor.oo";
+
+pub fn oobackup_version() -> String {
+    return "0.2.0";
+}
+
+pub fn oobackup_summary() -> String {
+    return "Sovereign Point-in-Time Backup & Incremental Snapshot Coordinator";
+}
